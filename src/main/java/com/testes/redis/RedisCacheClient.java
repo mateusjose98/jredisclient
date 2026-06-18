@@ -1,19 +1,34 @@
 package com.testes.redis;
 
-import java.io.Closeable;
+import java.io.Serializable;
 import java.time.Duration;
 import java.util.Optional;
-import java.util.function.Function;
 
-public interface RedisCacheClient extends Closeable {
+public interface RedisCacheClient extends AutoCloseable {
 
   Optional<String> get(String key);
 
   String getOrDefault(String key, String defaultValue);
 
+  <T extends Serializable> Optional<T> getObject(String key, Class<T> type);
+
+  <T> Optional<T> getObject(String key, RedisSerializer<T> serializer);
+
+  <T extends Serializable> T getObjectOrDefault(String key, T defaultValue, Class<T> type);
+
+  <T> T getObjectOrDefault(String key, T defaultValue, RedisSerializer<T> serializer);
+
   boolean set(String key, String value);
 
   boolean set(String key, String value, Duration ttl);
+
+  <T extends Serializable> boolean setObject(String key, T value);
+
+  <T extends Serializable> boolean setObject(String key, T value, Duration ttl);
+
+  <T> boolean setObject(String key, T value, RedisSerializer<T> serializer);
+
+  <T> boolean setObject(String key, T value, Duration ttl, RedisSerializer<T> serializer);
 
   boolean delete(String key);
 
@@ -21,7 +36,11 @@ public interface RedisCacheClient extends Closeable {
 
   long incrementBy(String key, long delta);
 
-  <T> T execute(String operationName, String key, Function<redis.clients.jedis.Jedis, T> callback, T fallback);
+  void invalidateLocal(String key);
+
+  void clearLocalCache();
+
+  RedisClientStatus status();
 
   @Override
   void close();

@@ -1,76 +1,79 @@
 package com.testes.redis;
 
-import java.time.Instant;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class CircuitBreaker {
 
-  enum State {
-    CLOSED, OPEN, HALF_OPEN
+  public enum State {
+    CLOSED,
+    OPEN,
+    HALF_OPEN
   }
 
   private final int failureThreshold;
-  private final long resetTimeoutMs;
+  private final long openIntervalMs;
   private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
-  private final AtomicInteger failureCount = new AtomicInteger(0);
-  private final AtomicLong lastFailureTimeMs = new AtomicLong(0);
+  private final AtomicInteger consecutiveFailures = new AtomicInteger(0);
+  private final AtomicLong openUntilMs = new AtomicLong(0);
+  private final AtomicBoolean halfOpenProbeInFlight = new AtomicBoolean(false);
 
-  public CircuitBreaker(int failureThreshold, long resetTimeoutMs) {
+  public CircuitBreaker(int failureThreshold, Duration openInterval) {
     this.failureThreshold = failureThreshold;
-    this.resetTimeoutMs = resetTimeoutMs;
+    this.openIntervalMs = openInterval.toMillis();
   }
 
-  public <T> T call(CheckedSupplier<T> supplier, T fallback) throws Exception {
-    State currentState = state.get();
-
-    if (currentState == State.OPEN) {
-      if (System.currentTimeMillis() - lastFailureTimeMs.get() > resetTimeoutMs) {
-        state.set(State.HALF_OPEN);
-        failureCount.set(0);
-      } else {
-        return fallback;
+  public boolean tryAcquirePermission() {
+    while (true) {
+      State current = state.get();
+      if (current == State.CLOSED) {
+        return true;
       }
-    }
-
-    try {
-      T result = supplier.get();
-      onSuccess();
-      return result;
-    } catch (Exception exception) {
-      onFailure();
-      if (currentState == State.HALF_OPEN) {
-        state.set(State.OPEN);
-        throw exception;
+      if (current == State.OPEN) {
+        long now = System.currentTimeMillis();
+        if (now < openUntilMs.get()) {
+          return false;
+        }
+        if (state.compareAndSet(State.OPEN, State.HALF_OPEN)) {
+          halfOpenProbeInFlight.set(false);
+        }
+        continue;
       }
-      throw exception;
+      return halfOpenProbeInFlight.compareAndSet(false, true);
     }
   }
 
-  private void onSuccess() {
-    failureCount.set(0);
+  public void recordSuccess() {
+    consecutiveFailures.set(0);
+    openUntilMs.set(0);
+    halfOpenProbeInFlight.set(false);
     state.set(State.CLOSED);
   }
 
-  private void onFailure() {
-    lastFailureTimeMs.set(System.currentTimeMillis());
-    int failures = failureCount.incrementAndGet();
+  public void recordFailure() {
+    State current = state.get();
+    halfOpenProbeInFlight.set(false);
+    if (current == State.HALF_OPEN) {
+      openCircuit();
+      return;
+    }
+
+    int failures = consecutiveFailures.incrementAndGet();
     if (failures >= failureThreshold) {
-      state.set(State.OPEN);
+      openCircuit();
     }
   }
 
-  public boolean isOpen() {
-    return state.get() == State.OPEN;
+  public State getState() {
+    return state.get();
   }
 
-  public String getState() {
-    return state.get().name();
-  }
-
-  @FunctionalInterface
-  public interface CheckedSupplier<T> {
-    T get() throws Exception;
+  private void openCircuit() {
+    consecutiveFailures.set(0);
+    openUntilMs.set(System.currentTimeMillis() + openIntervalMs);
+    state.set(State.OPEN);
   }
 }

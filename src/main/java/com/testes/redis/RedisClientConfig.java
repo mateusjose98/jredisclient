@@ -16,12 +16,13 @@ public final class RedisClientConfig {
   private final Duration connectionTimeout;
   private final Duration socketTimeout;
   private final Duration defaultTtl;
+  private final Duration localCacheTtl;
+  private final long localCacheMaxSize;
   private final GenericObjectPoolConfig<Jedis> poolConfig;
   private final boolean circuitBreakerEnabled;
   private final int circuitBreakerFailureThreshold;
-  private final long circuitBreakerResetTimeoutMs;
-  private final boolean healthCheckEnabled;
-  private final Duration healthCheckInterval;
+  private final Duration circuitBreakerOpenDuration;
+  private final Duration failureLogInterval;
 
   private RedisClientConfig(Builder builder) {
     this.host = builder.host;
@@ -32,12 +33,13 @@ public final class RedisClientConfig {
     this.connectionTimeout = builder.connectionTimeout;
     this.socketTimeout = builder.socketTimeout;
     this.defaultTtl = builder.defaultTtl;
-    this.poolConfig = builder.poolConfig;
+    this.localCacheTtl = builder.localCacheTtl;
+    this.localCacheMaxSize = builder.localCacheMaxSize;
+    this.poolConfig = builder.poolConfig.clone();
     this.circuitBreakerEnabled = builder.circuitBreakerEnabled;
     this.circuitBreakerFailureThreshold = builder.circuitBreakerFailureThreshold;
-    this.circuitBreakerResetTimeoutMs = builder.circuitBreakerResetTimeoutMs;
-    this.healthCheckEnabled = builder.healthCheckEnabled;
-    this.healthCheckInterval = builder.healthCheckInterval;
+    this.circuitBreakerOpenDuration = builder.circuitBreakerOpenDuration;
+    this.failureLogInterval = builder.failureLogInterval;
   }
 
   public static Builder builder() {
@@ -76,8 +78,16 @@ public final class RedisClientConfig {
     return defaultTtl;
   }
 
-  public GenericObjectPoolConfig<Jedis> getPoolConfig() {
-    return poolConfig;
+  public Duration getLocalCacheTtl() {
+    return localCacheTtl;
+  }
+
+  public long getLocalCacheMaxSize() {
+    return localCacheMaxSize;
+  }
+
+  public GenericObjectPoolConfig<Jedis> newPoolConfig() {
+    return poolConfig.clone();
   }
 
   public boolean isCircuitBreakerEnabled() {
@@ -88,16 +98,12 @@ public final class RedisClientConfig {
     return circuitBreakerFailureThreshold;
   }
 
-  public long getCircuitBreakerResetTimeoutMs() {
-    return circuitBreakerResetTimeoutMs;
+  public Duration getCircuitBreakerOpenDuration() {
+    return circuitBreakerOpenDuration;
   }
 
-  public boolean isHealthCheckEnabled() {
-    return healthCheckEnabled;
-  }
-
-  public Duration getHealthCheckInterval() {
-    return healthCheckInterval;
+  public Duration getFailureLogInterval() {
+    return failureLogInterval;
   }
 
   public static final class Builder {
@@ -109,23 +115,25 @@ public final class RedisClientConfig {
     private Duration connectionTimeout = Duration.ofMillis(1_500);
     private Duration socketTimeout = Duration.ofMillis(1_500);
     private Duration defaultTtl = Duration.ofMinutes(5);
+    private Duration localCacheTtl = Duration.ofSeconds(5);
+    private long localCacheMaxSize = 10_000;
     private GenericObjectPoolConfig<Jedis> poolConfig = defaultPoolConfig();
     private boolean circuitBreakerEnabled = true;
-    private int circuitBreakerFailureThreshold = 5;
-    private long circuitBreakerResetTimeoutMs = 30_000;
-    private boolean healthCheckEnabled = true;
-    private Duration healthCheckInterval = Duration.ofSeconds(30);
+    private int circuitBreakerFailureThreshold = 3;
+    private Duration circuitBreakerOpenDuration = Duration.ofSeconds(15);
+    private Duration failureLogInterval = Duration.ofSeconds(30);
 
     private static GenericObjectPoolConfig<Jedis> defaultPoolConfig() {
       GenericObjectPoolConfig<Jedis> config = new GenericObjectPoolConfig<>();
-      config.setMaxTotal(100);
-      config.setMaxIdle(32);
-      config.setMinIdle(16);
+      config.setMaxTotal(64);
+      config.setMaxIdle(16);
+      config.setMinIdle(4);
       config.setBlockWhenExhausted(false);
       config.setTestOnBorrow(false);
       config.setTestWhileIdle(true);
       config.setTimeBetweenEvictionRuns(Duration.ofSeconds(30));
       config.setMinEvictableIdleDuration(Duration.ofMinutes(1));
+      config.setJmxEnabled(false);
       return config;
     }
 
@@ -169,8 +177,53 @@ public final class RedisClientConfig {
       return this;
     }
 
+    public Builder localCacheTtl(Duration localCacheTtl) {
+      this.localCacheTtl = Objects.requireNonNull(localCacheTtl, "localCacheTtl");
+      return this;
+    }
+
+    public Builder localCacheMaxSize(long localCacheMaxSize) {
+      this.localCacheMaxSize = localCacheMaxSize;
+      return this;
+    }
+
     public Builder poolConfig(GenericObjectPoolConfig<Jedis> poolConfig) {
-      this.poolConfig = Objects.requireNonNull(poolConfig, "poolConfig");
+      this.poolConfig = Objects.requireNonNull(poolConfig, "poolConfig").clone();
+      return this;
+    }
+
+    public Builder poolMaxTotal(int maxTotal) {
+      poolConfig.setMaxTotal(maxTotal);
+      return this;
+    }
+
+    public Builder poolMaxIdle(int maxIdle) {
+      poolConfig.setMaxIdle(maxIdle);
+      return this;
+    }
+
+    public Builder poolMinIdle(int minIdle) {
+      poolConfig.setMinIdle(minIdle);
+      return this;
+    }
+
+    public Builder poolBlockWhenExhausted(boolean blockWhenExhausted) {
+      poolConfig.setBlockWhenExhausted(blockWhenExhausted);
+      return this;
+    }
+
+    public Builder poolTestWhileIdle(boolean testWhileIdle) {
+      poolConfig.setTestWhileIdle(testWhileIdle);
+      return this;
+    }
+
+    public Builder poolEvictionInterval(Duration interval) {
+      poolConfig.setTimeBetweenEvictionRuns(Objects.requireNonNull(interval, "interval"));
+      return this;
+    }
+
+    public Builder poolMinEvictableIdle(Duration duration) {
+      poolConfig.setMinEvictableIdleDuration(Objects.requireNonNull(duration, "duration"));
       return this;
     }
 
@@ -184,27 +237,49 @@ public final class RedisClientConfig {
       return this;
     }
 
-    public Builder circuitBreakerResetTimeoutMs(long timeoutMs) {
-      this.circuitBreakerResetTimeoutMs = timeoutMs;
+    public Builder circuitBreakerOpenDuration(Duration duration) {
+      this.circuitBreakerOpenDuration = Objects.requireNonNull(duration, "duration");
       return this;
     }
 
-    public Builder healthCheckEnabled(boolean enabled) {
-      this.healthCheckEnabled = enabled;
-      return this;
-    }
-
-    public Builder healthCheckInterval(Duration interval) {
-      this.healthCheckInterval = Objects.requireNonNull(interval, "healthCheckInterval");
+    public Builder failureLogInterval(Duration failureLogInterval) {
+      this.failureLogInterval = Objects.requireNonNull(failureLogInterval, "failureLogInterval");
       return this;
     }
 
     public RedisClientConfig build() {
-      if (port <= 0 || port > 65535) {
+      if (host.isBlank()) {
+        throw new IllegalArgumentException("host must not be blank");
+      }
+      if (port <= 0 || port > 65_535) {
         throw new IllegalArgumentException("port must be between 1 and 65535");
       }
       if (database < 0) {
         throw new IllegalArgumentException("database must be >= 0");
+      }
+      if (connectionTimeout.isNegative() || connectionTimeout.isZero()) {
+        throw new IllegalArgumentException("connectionTimeout must be > 0");
+      }
+      if (socketTimeout.isNegative() || socketTimeout.isZero()) {
+        throw new IllegalArgumentException("socketTimeout must be > 0");
+      }
+      if (defaultTtl.isNegative() || defaultTtl.isZero()) {
+        throw new IllegalArgumentException("defaultTtl must be > 0");
+      }
+      if (localCacheTtl.isNegative() || localCacheTtl.isZero()) {
+        throw new IllegalArgumentException("localCacheTtl must be > 0");
+      }
+      if (localCacheMaxSize <= 0) {
+        throw new IllegalArgumentException("localCacheMaxSize must be > 0");
+      }
+      if (circuitBreakerFailureThreshold <= 0) {
+        throw new IllegalArgumentException("circuitBreakerFailureThreshold must be > 0");
+      }
+      if (circuitBreakerOpenDuration.isNegative() || circuitBreakerOpenDuration.isZero()) {
+        throw new IllegalArgumentException("circuitBreakerOpenDuration must be > 0");
+      }
+      if (failureLogInterval.isNegative() || failureLogInterval.isZero()) {
+        throw new IllegalArgumentException("failureLogInterval must be > 0");
       }
       return new RedisClientConfig(this);
     }
