@@ -1,285 +1,269 @@
-# Redis Cache Client - Java 11
+# redisclient
 
-Biblioteca de cache para Redis com foco em resiliencia para aplicacoes JEE e webapps multithread.
+Biblioteca Java para cache em dois niveis:
 
-## Dependencias do projeto
+- L1 em memoria com Caffeine (baixa latencia).
+- L2 em Redis com Jedis (compartilhado entre instancias da aplicacao).
 
-- `redis.clients:jedis:5.1.3`
-- `com.github.ben-manes.caffeine:caffeine:3.1.8`
-- `org.slf4j:slf4j-api:2.0.13`
+O projeto oferece:
 
-Para testes:
+- API de cache em memoria (`InMemoryCacheApi`).
+- API de cache Redis com serializacao JSON (`RedisCacheApi`).
+- Gerenciador L1/L2 com fallback automatico (`L1L2CacheManager`).
 
-- `org.junit.jupiter:junit-jupiter:5.10.2`
-- o projeto de exemplo nao empacota binding SLF4J; a aplicacao cliente deve fornecer o binding desejado
+## Objetivo do projeto
 
-## O que a lib entrega
+Este projeto foi feito para simplificar um padrao comum em sistemas de alta leitura:
 
-- `JedisPool` com configuracao feita pelo app cliente.
-- Cache local L1 por instancia com TTL curto e `maximumSize`.
-- Fallback silencioso para o cache local quando o Redis cair.
-- `CircuitBreaker` para fast-fail e para evitar cascata de timeout.
-- Nenhuma thread interna da lib, o que evita atrito com containers JEE.
-- Suporte a objetos com serializacao pluggable.
+1. Buscar primeiro no cache local (L1).
+2. Se nao encontrar, buscar no Redis (L2).
+3. Se encontrar no L2, repopular o L1.
 
-## Contrato de falha
+Com isso, voce reduz latencia media e diminui carga no Redis para chaves muito acessadas.
 
-Quando o Redis estiver indisponivel:
+## Stack e requisitos
 
-- `get(...)` retorna `Optional.empty()` se nao houver valor no L1.
-- `getOrDefault(...)` retorna o valor default se nao houver valor no L1.
-- `getObject(...)` retorna `Optional.empty()` se nao houver valor no L1.
-- `getObjectOrDefault(...)` retorna o valor default se nao houver valor no L1.
-- `set(...)` retorna `false`, mas mantem o valor no cache local da instancia.
-- `setObject(...)` retorna `false`, mas mantem o valor no cache local da instancia.
-- `delete(...)` retorna `false`.
-- `increment/incrementBy(...)` retornam `0`.
+- Java 11
+- Maven 3.8+
+- Redis 6+ (ou compativel)
 
-Ou seja: a indisponibilidade do Redis nao sobe excecao para o codigo de negocio.
+Dependencias principais:
 
-## API principal
+- Caffeine
+- Jedis
+- Jackson (serializacao/desserializacao)
 
-Classes publicas:
+## Estrutura principal
 
-- `com.testes.redis.RedisClientConfig`
-- `com.testes.redis.RedisClients`
-- `com.testes.redis.RedisCacheClient`
-- `com.testes.redis.JedisRedisCacheClientImpl`
-- `com.testes.redis.RedisClientStatus`
-- `com.testes.redis.RedisSerializer`
-- `com.testes.redis.RedisSerializers`
+- `src/main/java/com/testes/l1/ConfiguracaoCacheMemoria.java`
+- `src/main/java/com/testes/l1/InMemoryCacheApi.java`
+- `src/main/java/com/testes/l2/ConfiguracaoRedis.java`
+- `src/main/java/com/testes/l2/JacksonCacheSerializer.java`
+- `src/main/java/com/testes/l2/RedisCacheApi.java`
+- `src/main/java/com/testes/L1L2CacheManager.java`
+- `src/main/java/com/testes/MainL1.java`
+- `src/main/java/com/testes/MainL2.java`
+- `src/main/java/com/testes/MainL1L2.java`
 
-## Suporte a objetos
+## Como funciona cada camada
 
-A lib agora suporta dois modos:
+### L1 - InMemoryCacheApi
 
-- Objeto `Serializable` com serializer padrao da propria lib.
-- Objeto qualquer usando `RedisSerializer<T>` custom.
-- Conversao JSON nativa com suporte a datas via `RedisSerializers.json(...)`.
+Implementado com Caffeine, com dois controles:
 
-Datas suportadas no serializer JSON nativo:
+- `ttlSegundos`: tempo de expiracao apos escrita.
+- `tamanhoMaximo`: quantidade maxima de entradas.
 
-- `java.time.LocalDate`
-- `java.time.LocalDateTime`
-- `java.time.LocalTime`
-- `java.time.Instant`
-- `java.time.OffsetDateTime`
-- `java.time.ZonedDateTime`
-- `java.util.Date`
+Operacoes:
 
-Exemplo com `Serializable`:
+- `put(key, value)`
+- `get(key, Class<T>)`
+- `remove(key)`
 
-```java
-public class ProdutoCache implements java.io.Serializable {
-  private final String id;
-  private final int versao;
+### L2 - RedisCacheApi
 
-  public ProdutoCache(String id, int versao) {
-    this.id = id;
-    this.versao = versao;
-  }
-}
+Implementado com pool de conexoes Jedis e serializacao em JSON.
 
-ProdutoCache value = new ProdutoCache("123", 7);
-client.setObject("produto:123", value, Duration.ofMinutes(2));
+Operacoes principais:
 
-ProdutoCache cached = client.getObjectOrDefault(
-    "produto:123",
-    new ProdutoCache("default", 0),
-    ProdutoCache.class);
+- `put(key, value)`
+- `put(key, value, ttlSeconds)`
+- `get(key, Class<T>)`
+- `exists(key)`
+- `ttl(key)`
+- `expire(key, ttlSeconds)`
+- `remove(key)`
+
+Observacoes importantes:
+
+- Quando `ambiente` e informado, a chave no Redis vira `ambiente:chave`.
+- A API ignora entradas invalidas (por exemplo, `value == null` ou `ttl <= 0`) e registra aviso em log.
+
+### L1 + L2 - L1L2CacheManager
+
+Fluxo de leitura:
+
+1. Tenta L1.
+2. Se nao achar, tenta L2.
+3. Se achar no L2, grava no L1.
+
+Fluxo de escrita:
+
+- Grava no L1 e no L2 (com TTL no L2).
+
+## Build e execucao
+
+Na raiz do projeto:
+
+```bash
+mvn clean package
 ```
 
-Exemplo com serializer custom:
+Executar exemplos pela IDE (forma mais simples):
 
-```java
-public final class ProdutoSerializer implements RedisSerializer<Produto> {
-  @Override
-  public Class<Produto> targetType() {
-    return Produto.class;
-  }
+- Execute a classe `com.testes.MainL1`
+- Execute a classe `com.testes.MainL2`
+- Execute a classe `com.testes.MainL1L2`
 
-  @Override
-  public String serialize(Produto value) {
-    return value.getId() + "|" + value.getNome();
-  }
+Executar exemplos via Maven (sem configurar plugin no `pom.xml`):
 
-  @Override
-  public Produto deserialize(String payload) {
-    String[] parts = payload.split("\\|", 2);
-    return new Produto(parts[0], parts[1]);
-  }
-}
-
-RedisSerializer<Produto> serializer = new ProdutoSerializer();
-client.setObject("produto:custom:1", new Produto("1", "Mouse"), Duration.ofMinutes(2), serializer);
-Produto cached = client.getObjectOrDefault("produto:custom:1", null, serializer);
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.5.0:java -Dexec.mainClass=com.testes.MainL1
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.5.0:java -Dexec.mainClass=com.testes.MainL2
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.5.0:java -Dexec.mainClass=com.testes.MainL1L2
 ```
 
-Exemplo com JSON e datas:
+Se voce preferir apenas compilar sem executar exemplos:
 
-```java
-public class PedidoCache {
-  private String id;
-  private java.time.LocalDate businessDate;
-  private java.time.LocalDateTime generatedAt;
-  private java.util.Date legacyDate;
-
-  public PedidoCache() {
-  }
-
-  public PedidoCache(String id, LocalDate businessDate, LocalDateTime generatedAt, Date legacyDate) {
-    this.id = id;
-    this.businessDate = businessDate;
-    this.generatedAt = generatedAt;
-    this.legacyDate = legacyDate;
-  }
-
-  // getters/setters
-}
-
-RedisSerializer<PedidoCache> jsonSerializer = RedisSerializers.json(PedidoCache.class);
-
-PedidoCache payload = new PedidoCache(
-    "pedido-1",
-    LocalDate.now(),
-    LocalDateTime.now(),
-    new Date());
-
-client.setObject("pedido:1", payload, Duration.ofMinutes(2), jsonSerializer);
-PedidoCache cached = client.getObjectOrDefault("pedido:1", null, jsonSerializer);
+```bash
+mvn -DskipTests package
 ```
 
-Observacao:
-
-- Para conversao JSON, prefira objetos com construtor sem argumentos e getters/setters publicos, ou anote a classe para Jackson conforme o seu padrao.
-
-## Exemplo de configuracao
+## Exemplo rapido de uso (L1)
 
 ```java
-import com.testes.redis.RedisCacheClient;
-import com.testes.redis.RedisClientConfig;
-import com.testes.redis.RedisClients;
+ConfiguracaoCacheMemoria cfgMemoria = new ConfiguracaoCacheMemoria(60, 10_000);
+InMemoryCacheApi cacheL1 = new InMemoryCacheApi(cfgMemoria);
 
-import java.time.Duration;
+cacheL1.put("cliente:123", "Joao");
+String nome = cacheL1.get("cliente:123", String.class).orElse("nao encontrado");
 
-RedisClientConfig config = RedisClientConfig.builder()
-    .host("redis.interno")
-    .port(6379)
-    .database(0)
-    .connectionTimeout(Duration.ofMillis(800))
-    .socketTimeout(Duration.ofMillis(800))
-    .defaultTtl(Duration.ofMinutes(5))
-    .localCacheTtl(Duration.ofSeconds(5))
-    .localCacheMaxSize(10_000)
-    .poolMaxTotal(128)
-    .poolMaxIdle(32)
-    .poolMinIdle(8)
-    .poolBlockWhenExhausted(false)
-    .circuitBreakerFailureThreshold(3)
-    .circuitBreakerOpenDuration(Duration.ofSeconds(15))
-    .build();
-
-RedisCacheClient client = RedisClients.create(config);
+cacheL1.close();
 ```
 
-## Exemplo de uso
+## Exemplo rapido de uso (L2 Redis)
 
 ```java
-String key = "produto:123";
+ConfiguracaoRedis cfgRedis = ConfiguracaoRedis.builder()
+		.ambiente("dev")
+		.host("localhost")
+		.port(6379)
+		.database(0)
+		.timeout(2000)
+		.maxConnections(32)
+		.maxIdleConnections(16)
+		.minIdleConnections(4)
+		.maxWaitMillis(100)
+		.blockWhenExhausted(true)
+		.build();
 
-String value = client.getOrDefault(key, null);
-if (value == null) {
-  value = "resultado-processado";
-  client.set(key, value, Duration.ofMinutes(2));
+try (RedisCacheApi cacheL2 = new RedisCacheApi(cfgRedis)) {
+	cacheL2.put("produto:1", "Notebook", 120);
+	String valor = cacheL2.get("produto:1", String.class).orElse("nao encontrado");
+	System.out.println(valor);
 }
 ```
 
-## Uso em JEE
+## Exemplo rapido de uso (L1 + L2)
 
 ```java
-package br.com.seuapp.infra;
+InMemoryCacheApi l1 = new InMemoryCacheApi(new ConfiguracaoCacheMemoria(30, 5_000));
 
-import com.testes.redis.RedisCacheClient;
-import com.testes.redis.RedisClientConfig;
-import com.testes.redis.RedisClients;
+ConfiguracaoRedis cfgRedis = ConfiguracaoRedis.builder()
+		.ambiente("dev")
+		.host("localhost")
+		.port(6379)
+		.database(0)
+		.timeout(2000)
+		.maxConnections(32)
+		.maxIdleConnections(16)
+		.minIdleConnections(4)
+		.maxWaitMillis(100)
+		.blockWhenExhausted(true)
+		.build();
 
-import javax.annotation.PreDestroy;
-import javax.enterprise.context.ApplicationScoped;
-import javax.enterprise.inject.Produces;
-import java.time.Duration;
+try (RedisCacheApi l2 = new RedisCacheApi(cfgRedis);
+		 L1L2CacheManager cache = new L1L2CacheManager(l1, l2)) {
 
-@ApplicationScoped
-public class RedisProducer {
+	cache.put("pedido:999", "status=aprovado", 60);
 
-  private RedisCacheClient client;
-
-  @Produces
-  @ApplicationScoped
-  public RedisCacheClient redisCacheClient() {
-    if (client == null) {
-      client = RedisClients.create(
-          RedisClientConfig.builder()
-              .host(System.getProperty("app.redis.host", "localhost"))
-              .port(Integer.parseInt(System.getProperty("app.redis.port", "6379")))
-              .defaultTtl(Duration.ofMinutes(5))
-              .localCacheTtl(Duration.ofSeconds(5))
-              .localCacheMaxSize(10_000)
-              .poolMaxTotal(128)
-              .build());
-    }
-    return client;
-  }
-
-  @PreDestroy
-  public void shutdown() {
-    if (client != null) {
-      client.close();
-    }
-  }
+	String status = cache.get("pedido:999", String.class).orElse("nao encontrado");
+	System.out.println(status);
 }
 ```
 
-## Observacoes de desenho
+## Configuracao recomendada para producao
 
-- O L1 e local a cada JVM/instancia. Em ambiente com varias VPSs ele nao e compartilhado.
-- O L1 usa TTL curto para reduzir staleness entre instancias.
-- `maximumSize` limita memoria para evitar crescimento indefinido.
-- O `CircuitBreaker` evita que a aplicacao fique pagando timeout de rede em cada requisicao durante quedas do Redis.
-- O pool usa `blockWhenExhausted(false)` por default para falhar rapido em vez de prender threads da aplicacao.
+Os valores abaixo sao um ponto de partida. Ajuste conforme volume, SLA e capacidade da sua infraestrutura.
 
-## Build
+### 1) Prefixo de ambiente
 
-Se o Maven nao estiver no `PATH`, rode o `mvn.cmd` do IntelliJ:
+- `ambiente`: use um valor claro por ambiente para evitar colisao de chave.
+	- Exemplo: `prod`, `staging`, `homolog`.
 
-```powershell
-& "C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2024.3.4\plugins\maven\lib\maven3\bin\mvn.cmd" test
+### 2) Timeouts de Redis
+
+- `timeout` (ms): 300 a 1000 para APIs de baixa latencia.
+	- Exemplo inicial: `500`.
+
+### 3) Pool de conexoes
+
+Para uma aplicacao de medio porte (2 a 8 vCPUs):
+
+- `maxConnections`: 64
+- `maxIdleConnections`: 16
+- `minIdleConnections`: 8
+- `blockWhenExhausted`: true
+- `maxWaitMillis`: 50 a 200
+
+Ponto de partida sugerido:
+
+```java
+ConfiguracaoRedis cfgProd = ConfiguracaoRedis.builder()
+		.ambiente("prod")
+		.host("redis-prod.seu-dominio")
+		.port(6379)
+		.password("definir-via-segredo")
+		.database(0)
+		.timeout(500)
+		.maxConnections(64)
+		.maxIdleConnections(16)
+		.minIdleConnections(8)
+		.maxWaitMillis(100)
+		.blockWhenExhausted(true)
+		.build();
 ```
 
-## Main de teste manual
+### 4) TTLs
 
-Classe pronta:
+Sugestao por perfil de dado:
 
-- `com.testes.Main`
+- Dados quase estaticos (catalogos, tabelas de referencia): 10 a 60 minutos.
+- Sessao ou estado curto: 30 a 300 segundos.
+- Resultado de consulta pesada: 60 a 600 segundos.
 
-Smoke test basico:
+Boa pratica:
 
-```powershell
-& "C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2024.3.4\plugins\maven\lib\maven3\bin\mvn.cmd" -q package dependency:copy-dependencies
-java -cp target\classes;target\dependency\* -Dredis.host=localhost -Dredis.port=6379 com.testes.Main
+- Use TTL no L2 (`put(key, value, ttlSeconds)`).
+- Use TTL mais curto no L1 para reduzir risco de staleness local.
+
+### 5) L1 (Caffeine)
+
+Valores iniciais comuns:
+
+- `ttlSegundos`: 15 a 120
+- `tamanhoMaximo`: 10_000 a 200_000
+
+Exemplo para servico de leitura intensa:
+
+```java
+ConfiguracaoCacheMemoria cfgL1Prod = new ConfiguracaoCacheMemoria(30, 50_000);
 ```
 
-Teste de fallback L1:
+## Boas praticas operacionais
 
-```powershell
-java -cp target\classes;target\dependency\* -Dredis.host=localhost -Dredis.port=6379 -Dtest.mode=fallback -Dredis.local.ttl.ms=10000 -Dtest.pause.before.fallback.ms=5000 com.testes.Main
-```
+- Trate cache como camada de aceleracao, nunca como unica fonte de verdade.
+- Monitore hit rate, latencia e erros do Redis.
+- Evite objetos gigantes no cache; prefira payloads menores e focados.
+- Normalize padrao de chave (exemplo: `entidade:id`).
+- Feche recursos no shutdown (`close()` em `RedisCacheApi` e `L1L2CacheManager`).
 
-Propriedades uteis:
+## Possiveis evolucoes
 
-- `redis.host`, `redis.port`, `redis.username`, `redis.password`, `redis.database`
-- `redis.connect.timeout.ms`, `redis.socket.timeout.ms`
-- `redis.local.ttl.ms`, `redis.local.max.size`
-- `redis.pool.max.total`, `redis.pool.max.idle`, `redis.pool.min.idle`
-- `redis.cb.enabled`, `redis.cb.failure.threshold`, `redis.cb.open.seconds`
-- `test.key`, `test.object.key`, `test.counter.key`, `test.value`, `test.ttl.seconds`, `test.mode`
-- `test.local.printer.enabled`, `test.local.printer.interval.ms`, `test.keep.alive.ms`
+- Instrumentacao com metricas (Micrometer/Prometheus).
+- Politicas de retry e fallback mais detalhadas em falhas de Redis.
+- Invalidação em lote por namespace/prefixo.
+
+## Licenca
+
+Defina a licenca do projeto conforme politica do seu time/empresa.
