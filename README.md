@@ -266,4 +266,4 @@ ConfiguracaoCacheMemoria cfgL1Prod = new ConfiguracaoCacheMemoria(30, 50_000);
 
 ## Licenca
 
-Defina a licenca do projeto conforme politica do seu time/empresa.
+Use com moderação :)
